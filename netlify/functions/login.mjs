@@ -6,12 +6,13 @@ const PHONE_HASH_SECRET = process.env.ICC_QUIZ_PHONE_HASH_SECRET;
 
 const SESSION_DAYS = 90;
 
-const json = (body, status = 200) =>
+const json = (body, status = 200, extraHeaders = {}) =>
   new Response(JSON.stringify(body), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
+      ...extraHeaders,
     },
   });
 
@@ -299,18 +300,27 @@ export default async (req) => {
     const session =
       await createSession(user.id);
 
-    return json({
-      ok: true,
-      isNewUser,
-      sessionToken: session.token,
-      expiresAt: session.expiresAt,
+    const maxAge = SESSION_DAYS * 24 * 60 * 60;
 
-      user: {
-        id: user.id,
-        displayName: user.display_name,
-        avatar: user.avatar_key,
-      },
-    });
+return json(
+  {
+    ok: true,
+    isNewUser,
+    expiresAt: session.expiresAt,
+
+    user: {
+      id: user.id,
+      displayName: user.display_name,
+      avatar: user.avatar_key,
+    },
+  },
+  200,
+  {
+    "set-cookie":
+      `__Host-icc_quiz_session=${session.token}; ` +
+      `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAge}`,
+  }
+);
   } catch (error) {
     console.error("Login error:", error);
 
