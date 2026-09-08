@@ -8,9 +8,6 @@ const SUPABASE_SECRET_KEY =
 
 const COOKIE_NAME = "__Host-icc_quiz_session";
 
-const CURRENT_QUIZ_SLUG =
-  "travail-de-fond-gagneur-ames-2026-09-06";
-
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -33,9 +30,7 @@ function getCookie(req, name) {
     const key = trimmed.slice(0, separator);
     const value = trimmed.slice(separator + 1);
 
-    if (key === name) {
-      return value;
-    }
+    if (key === name) return value;
   }
 
   return null;
@@ -110,7 +105,7 @@ async function getQuiz(quizId) {
     id: `eq.${quizId}`,
     is_published: "eq.true",
     select:
-      "id,title,slug,unit_id,max_score",
+      "id,title,slug,unit_id,max_score,content,content_version",
     limit: "1",
   });
 
@@ -121,7 +116,10 @@ async function getQuiz(quizId) {
   return rows?.[0] ?? null;
 }
 
-async function getAttempt(userId, quizId) {
+async function getAttempt(
+  userId,
+  quizId
+) {
   const params = new URLSearchParams({
     user_id: `eq.${userId}`,
     quiz_id: `eq.${quizId}`,
@@ -146,31 +144,29 @@ function normalizeText(value) {
 }
 
 function normalizeArray(value) {
-  if (!Array.isArray(value)) {
-    return value == null || value === ""
-      ? []
-      : [String(value)];
+  if (Array.isArray(value)) {
+    return [
+      ...new Set(
+        value
+          .map((item) =>
+            String(item).trim()
+          )
+          .filter(Boolean)
+      ),
+    ].sort();
   }
 
-  return [...new Set(
-    value.map(String)
-  )].sort();
-}
+  if (
+    value !== undefined &&
+    value !== null &&
+    String(value).trim()
+  ) {
+    return [
+      String(value).trim(),
+    ];
+  }
 
-function sameAnswers(answer, expected) {
-  const actual =
-    normalizeArray(answer);
-
-  const correct =
-    [...expected].sort();
-
-  return (
-    actual.length === correct.length &&
-    actual.every(
-      (value, index) =>
-        value === correct[index]
-    )
-  );
+  return [];
 }
 
 function hasAnswer(value) {
@@ -178,104 +174,91 @@ function hasAnswer(value) {
     return value.length > 0;
   }
 
-  return String(value ?? "").trim() !== "";
-}
-
-function evaluateAnswers(answers) {
-  const required = [
-    "q1",
-    "q2",
-    "q3",
-    "q4",
-    "q5",
-    "q6",
-    "q7",
-    "q8",
-    "q9",
-    "q10",
-  ];
-
-  for (const key of required) {
-    if (!hasAnswer(answers[key])) {
-      throw new Error(
-        `La réponse ${key} est manquante.`
-      );
-    }
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return false;
   }
 
-  const results = {
-    q1: sameAnswers(
-      answers.q1,
-      ["A", "C", "E"]
-    ),
-
-    q2: sameAnswers(
-      answers.q2,
-      ["A", "B", "D", "E", "G", "H"]
-    ),
-
-    q3: sameAnswers(
-      answers.q3,
-      ["B"]
-    ),
-
-    q4: sameAnswers(
-      answers.q4,
-      ["A", "B", "C", "D", "E", "F", "G", "I"]
-    ),
-
-    q5: sameAnswers(
-      answers.q5,
-      ["A", "C"]
-    ),
-
-    q6: sameAnswers(
-      answers.q6,
-      ["A", "B", "D"]
-    ),
-
-    q7:
-      normalizeText(answers.q7) ===
-      "LUISE",
-
-    q8: sameAnswers(
-      answers.q8,
-      ["B"]
-    ),
-
-    // Question personnelle :
-    // elle vaut 1 point dès qu'au moins
-    // un terrain a été sélectionné.
-    q9:
-      normalizeArray(
-        answers.q9
-      ).length > 0,
-
-    q10: sameAnswers(
-      answers.q10,
-      ["A", "B", "C", "D", "E"]
-    ),
-  };
-
-  const score =
-    Object.values(results)
-      .filter(Boolean)
-      .length;
-
-  return {
-    score,
-    results,
-  };
+  return String(value).trim().length > 0;
 }
 
-function getReward(score, maxScore) {
+function evaluateQuestion(
+  question,
+  answer
+) {
+  const evaluation =
+    question.evaluation;
+
+  if (!evaluation?.mode) {
+    throw new Error(
+      `Configuration manquante pour ${question.id}.`
+    );
+  }
+
+  if (
+    evaluation.mode ===
+    "exact_set"
+  ) {
+    const submitted =
+      normalizeArray(answer);
+
+    const correct =
+      normalizeArray(
+        evaluation.correct
+      );
+
+    return (
+      submitted.length ===
+        correct.length &&
+      submitted.every(
+        (value, index) =>
+          value === correct[index]
+      )
+    );
+  }
+
+  if (
+    evaluation.mode ===
+    "normalized_text"
+  ) {
+    const submitted =
+      normalizeText(answer);
+
+    const accepted =
+      (
+        evaluation.accepted ?? []
+      ).map(normalizeText);
+
+    return accepted.includes(
+      submitted
+    );
+  }
+
+  if (
+    evaluation.mode ===
+    "any_nonempty"
+  ) {
+    return hasAnswer(answer);
+  }
+
+  throw new Error(
+    `Mode d'évaluation inconnu pour ${question.id}.`
+  );
+}
+
+function calculateReward(
+  score,
+  maxScore
+) {
   const percentage =
     Math.round(
       (score / maxScore) *
         10000
     ) / 100;
 
-  if (percentage === 100) {
+  if (score === maxScore) {
     return {
       percentage,
       trophy: "gold",
@@ -308,19 +291,32 @@ function getReward(score, maxScore) {
 
 async function saveAnswers(
   attemptId,
+  questions,
   answers,
   results
 ) {
   const rows =
-    Object.entries(results)
-      .map(([questionKey, correct]) => ({
-        attempt_id: attemptId,
-        question_key: questionKey,
+    questions.map(
+      (question) => ({
+        attempt_id:
+          attemptId,
+
+        question_key:
+          question.id,
+
         answer_data: {
-          value: answers[questionKey],
+          value:
+            answers[
+              question.id
+            ],
         },
-        is_correct: correct,
-      }));
+
+        is_correct:
+          results[
+            question.id
+          ],
+      })
+    );
 
   await supabase(
     "attempt_answers?on_conflict=attempt_id,question_key",
@@ -332,15 +328,15 @@ async function saveAnswers(
           "resolution=merge-duplicates,return=minimal",
       },
 
-      body: JSON.stringify(rows),
+      body:
+        JSON.stringify(rows),
     }
   );
 }
 
 async function completeAttempt(
   attemptId,
-  score,
-  reward
+  result
 ) {
   const params =
     new URLSearchParams({
@@ -348,7 +344,7 @@ async function completeAttempt(
       status: "eq.started",
     });
 
-  const rows = await supabase(
+  return await supabase(
     `attempts?${params.toString()}`,
     {
       method: "PATCH",
@@ -358,23 +354,22 @@ async function completeAttempt(
           "return=representation",
       },
 
-      body: JSON.stringify({
-        score,
-        percentage:
-          reward.percentage,
-        trophy:
-          reward.trophy,
-        points:
-          reward.points,
-        status:
-          "completed",
-        completed_at:
-          new Date().toISOString(),
-      }),
+      body:
+        JSON.stringify({
+          status: "completed",
+          score:
+            result.score,
+          percentage:
+            result.percentage,
+          trophy:
+            result.trophy,
+          points:
+            result.points,
+          completed_at:
+            new Date().toISOString(),
+        }),
     }
   );
-
-  return rows?.[0] ?? null;
 }
 
 export default async (req) => {
@@ -418,11 +413,10 @@ export default async (req) => {
       );
     }
 
-    const tokenHash =
-      hashSessionToken(token);
-
     const session =
-      await getSession(tokenHash);
+      await getSession(
+        hashSessionToken(token)
+      );
 
     if (
       !session ||
@@ -430,21 +424,6 @@ export default async (req) => {
         session.expires_at
       ).getTime() <= Date.now()
     ) {
-      return json(
-        {
-          ok: false,
-          authenticated: false,
-        },
-        401
-      );
-    }
-
-    const user =
-      await getUser(
-        session.user_id
-      );
-
-    if (!user) {
       return json(
         {
           ok: false,
@@ -463,20 +442,40 @@ export default async (req) => {
       ).trim();
 
     const answers =
-      body.answers ?? {};
+      body.answers;
 
-    if (!quizId) {
+    if (
+      !quizId ||
+      !answers ||
+      typeof answers !==
+        "object"
+    ) {
       return json(
         {
           error:
-            "Identifiant du quiz manquant.",
+            "Données du quiz incomplètes.",
         },
         400
       );
     }
 
-    const quiz =
-      await getQuiz(quizId);
+    const [user, quiz] =
+      await Promise.all([
+        getUser(
+          session.user_id
+        ),
+        getQuiz(quizId),
+      ]);
+
+    if (!user) {
+      return json(
+        {
+          error:
+            "Utilisateur introuvable.",
+        },
+        404
+      );
+    }
 
     if (!quiz) {
       return json(
@@ -489,29 +488,49 @@ export default async (req) => {
     }
 
     if (
-      quiz.unit_id !== null &&
+      quiz.unit_id &&
       quiz.unit_id !==
         user.unit_id
     ) {
       return json(
         {
           error:
-            "Quiz indisponible pour cette unité.",
+            "Ce quiz n'est pas disponible pour votre unité.",
         },
         403
       );
     }
 
+    const questions =
+      quiz.content
+        ?.questions;
+
     if (
-      quiz.slug !==
-      CURRENT_QUIZ_SLUG
+      !Array.isArray(
+        questions
+      ) ||
+      questions.length === 0
     ) {
       return json(
         {
           error:
-            "Le corrigé de ce quiz n'est pas encore disponible.",
+            "Le contenu de ce quiz est indisponible.",
         },
-        400
+        500
+      );
+    }
+
+    if (
+      Number(
+        quiz.max_score
+      ) !== questions.length
+    ) {
+      return json(
+        {
+          error:
+            "La configuration du score du quiz est incohérente.",
+        },
+        500
       );
     }
 
@@ -525,9 +544,9 @@ export default async (req) => {
       return json(
         {
           error:
-            "La tentative n'a pas été démarrée.",
+            "Commencez le quiz avant de le terminer.",
         },
-        409
+        400
       );
     }
 
@@ -543,49 +562,136 @@ export default async (req) => {
           result: {
             score:
               attempt.score,
+            maxScore:
+              Number(
+                quiz.max_score
+              ),
             percentage:
-              attempt.percentage,
+              Number(
+                attempt.percentage
+              ),
             trophy:
               attempt.trophy,
             points:
               attempt.points,
-            completedAt:
-              attempt.completed_at,
           },
         },
         409
       );
     }
 
-    const evaluation =
-      evaluateAnswers(
-        answers
-      );
+    const missing =
+      questions
+        .filter(
+          (question) =>
+            !hasAnswer(
+              answers[
+                question.id
+              ]
+            )
+        )
+        .map(
+          (question) =>
+            question.id
+        );
 
-    const reward =
-      getReward(
-        evaluation.score,
-        quiz.max_score
-      );
-
-    await saveAnswers(
-      attempt.id,
-      answers,
-      evaluation.results
-    );
-
-    const completed =
-      await completeAttempt(
-        attempt.id,
-        evaluation.score,
-        reward
-      );
-
-    if (!completed) {
+    if (missing.length) {
       return json(
         {
           error:
-            "La tentative ne peut plus être modifiée.",
+            "Toutes les questions doivent recevoir une réponse.",
+          missingQuestions:
+            missing,
+        },
+        400
+      );
+    }
+
+    const results = {};
+    let score = 0;
+
+    for (
+      const question
+      of questions
+    ) {
+      const correct =
+        evaluateQuestion(
+          question,
+          answers[
+            question.id
+          ]
+        );
+
+      results[
+        question.id
+      ] = correct;
+
+      if (correct) {
+        score += 1;
+      }
+    }
+
+    const maxScore =
+      questions.length;
+
+    const reward =
+      calculateReward(
+        score,
+        maxScore
+      );
+
+    const result = {
+      score,
+      maxScore,
+      percentage:
+        reward.percentage,
+      trophy:
+        reward.trophy,
+      points:
+        reward.points,
+    };
+
+    await saveAnswers(
+      attempt.id,
+      questions,
+      answers,
+      results
+    );
+
+    const updated =
+      await completeAttempt(
+        attempt.id,
+        result
+      );
+
+    if (
+      !updated ||
+      updated.length === 0
+    ) {
+      const existing =
+        await getAttempt(
+          user.id,
+          quiz.id
+        );
+
+      return json(
+        {
+          ok: false,
+          alreadyCompleted: true,
+
+          result: {
+            score:
+              existing?.score,
+            maxScore,
+            percentage:
+              Number(
+                existing?.percentage
+              ),
+            trophy:
+              existing?.trophy,
+            points:
+              existing?.points,
+          },
         },
         409
       );
@@ -593,23 +699,7 @@ export default async (req) => {
 
     return json({
       ok: true,
-
-      result: {
-        score:
-          evaluation.score,
-
-        maxScore:
-          quiz.max_score,
-
-        percentage:
-          reward.percentage,
-
-        trophy:
-          reward.trophy,
-
-        points:
-          reward.points,
-      },
+      result,
     });
   } catch (error) {
     console.error(
@@ -620,10 +710,9 @@ export default async (req) => {
     return json(
       {
         error:
-          error?.message ||
           "Impossible de terminer le quiz.",
       },
-      400
+      500
     );
   }
 };
