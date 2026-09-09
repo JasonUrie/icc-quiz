@@ -6,31 +6,38 @@ const SUPABASE_URL =
 const SUPABASE_SECRET_KEY =
   process.env.ICC_QUIZ_SUPABASE_SECRET_KEY;
 
-const COOKIE_NAME = "__Host-icc_quiz_session";
+const COOKIE_NAME =
+  "__Host-icc_quiz_session";
 
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
     headers: {
-      "content-type": "application/json; charset=utf-8",
+      "content-type":
+        "application/json; charset=utf-8",
       "cache-control": "no-store",
     },
   });
 
 function getCookie(req, name) {
-  const cookieHeader =
+  const header =
     req.headers.get("cookie") || "";
 
-  for (const cookie of cookieHeader.split(";")) {
+  for (const cookie of header.split(";")) {
     const trimmed = cookie.trim();
     const separator = trimmed.indexOf("=");
 
     if (separator === -1) continue;
 
-    const key = trimmed.slice(0, separator);
-    const value = trimmed.slice(separator + 1);
+    const key =
+      trimmed.slice(0, separator);
 
-    if (key === name) return value;
+    const value =
+      trimmed.slice(separator + 1);
+
+    if (key === name) {
+      return value;
+    }
   }
 
   return null;
@@ -42,20 +49,28 @@ function hashSessionToken(token) {
     .digest("hex");
 }
 
-async function supabase(path, options = {}) {
+async function supabase(
+  path,
+  options = {}
+) {
   const response = await fetch(
     `${SUPABASE_URL}/rest/v1/${path}`,
     {
       ...options,
       headers: {
-        apikey: SUPABASE_SECRET_KEY,
-        "content-type": "application/json",
+        apikey:
+          SUPABASE_SECRET_KEY,
+
+        "content-type":
+          "application/json",
+
         ...(options.headers ?? {}),
       },
     }
   );
 
-  const text = await response.text();
+  const text =
+    await response.text();
 
   if (!response.ok) {
     console.error(
@@ -69,49 +84,63 @@ async function supabase(path, options = {}) {
     );
   }
 
-  return text ? JSON.parse(text) : null;
+  return text
+    ? JSON.parse(text)
+    : null;
 }
 
 async function getSession(tokenHash) {
-  const params = new URLSearchParams({
-    token_hash: `eq.${tokenHash}`,
-    select: "user_id,expires_at",
-    limit: "1",
-  });
+  const params =
+    new URLSearchParams({
+      token_hash:
+        `eq.${tokenHash}`,
 
-  const rows = await supabase(
-    `user_sessions?${params.toString()}`
-  );
+      select:
+        "user_id,expires_at",
+
+      limit: "1",
+    });
+
+  const rows =
+    await supabase(
+      `user_sessions?${params.toString()}`
+    );
 
   return rows?.[0] ?? null;
 }
 
 async function getUser(userId) {
-  const params = new URLSearchParams({
-    id: `eq.${userId}`,
-    select: "id,unit_id",
-    limit: "1",
-  });
+  const params =
+    new URLSearchParams({
+      id: `eq.${userId}`,
+      select: "id,unit_id",
+      limit: "1",
+    });
 
-  const rows = await supabase(
-    `users?${params.toString()}`
-  );
+  const rows =
+    await supabase(
+      `users?${params.toString()}`
+    );
 
   return rows?.[0] ?? null;
 }
 
 async function getQuiz(quizId) {
-  const params = new URLSearchParams({
-    id: `eq.${quizId}`,
-    is_published: "eq.true",
-    select:
-      "id,title,slug,unit_id,max_score,content,content_version",
-    limit: "1",
-  });
+  const params =
+    new URLSearchParams({
+      id: `eq.${quizId}`,
+      is_published: "eq.true",
 
-  const rows = await supabase(
-    `quizzes?${params.toString()}`
-  );
+      select:
+        "id,unit_id,max_score,content",
+
+      limit: "1",
+    });
+
+  const rows =
+    await supabase(
+      `quizzes?${params.toString()}`
+    );
 
   return rows?.[0] ?? null;
 }
@@ -120,131 +149,42 @@ async function getAttempt(
   userId,
   quizId
 ) {
-  const params = new URLSearchParams({
-    user_id: `eq.${userId}`,
-    quiz_id: `eq.${quizId}`,
-    select:
-      "id,status,score,percentage,trophy,points,completed_at",
-    limit: "1",
-  });
+  const params =
+    new URLSearchParams({
+      user_id:
+        `eq.${userId}`,
 
-  const rows = await supabase(
-    `attempts?${params.toString()}`
-  );
+      quiz_id:
+        `eq.${quizId}`,
+
+      select:
+        "id,status,score,percentage,trophy,points,completed_at",
+
+      limit: "1",
+    });
+
+  const rows =
+    await supabase(
+      `attempts?${params.toString()}`
+    );
 
   return rows?.[0] ?? null;
 }
 
-function normalizeText(value) {
-  return String(value ?? "")
-    .normalize("NFD")
-    .replace(/\p{M}/gu, "")
-    .trim()
-    .toUpperCase();
-}
-
-function normalizeArray(value) {
-  if (Array.isArray(value)) {
-    return [
-      ...new Set(
-        value
-          .map((item) =>
-            String(item).trim()
-          )
-          .filter(Boolean)
-      ),
-    ].sort();
-  }
-
-  if (
-    value !== undefined &&
-    value !== null &&
-    String(value).trim()
-  ) {
-    return [
-      String(value).trim(),
-    ];
-  }
-
-  return [];
-}
-
-function hasAnswer(value) {
-  if (Array.isArray(value)) {
-    return value.length > 0;
-  }
-
-  if (
-    value === null ||
-    value === undefined
-  ) {
-    return false;
-  }
-
-  return String(value).trim().length > 0;
-}
-
-function evaluateQuestion(
-  question,
-  answer
+async function getLockedAnswers(
+  attemptId
 ) {
-  const evaluation =
-    question.evaluation;
+  const params =
+    new URLSearchParams({
+      attempt_id:
+        `eq.${attemptId}`,
 
-  if (!evaluation?.mode) {
-    throw new Error(
-      `Configuration manquante pour ${question.id}.`
-    );
-  }
+      select:
+        "question_key,is_correct",
+    });
 
-  if (
-    evaluation.mode ===
-    "exact_set"
-  ) {
-    const submitted =
-      normalizeArray(answer);
-
-    const correct =
-      normalizeArray(
-        evaluation.correct
-      );
-
-    return (
-      submitted.length ===
-        correct.length &&
-      submitted.every(
-        (value, index) =>
-          value === correct[index]
-      )
-    );
-  }
-
-  if (
-    evaluation.mode ===
-    "normalized_text"
-  ) {
-    const submitted =
-      normalizeText(answer);
-
-    const accepted =
-      (
-        evaluation.accepted ?? []
-      ).map(normalizeText);
-
-    return accepted.includes(
-      submitted
-    );
-  }
-
-  if (
-    evaluation.mode ===
-    "any_nonempty"
-  ) {
-    return hasAnswer(answer);
-  }
-
-  throw new Error(
-    `Mode d'évaluation inconnu pour ${question.id}.`
+  return await supabase(
+    `attempt_answers?${params.toString()}`
   );
 }
 
@@ -254,8 +194,7 @@ function calculateReward(
 ) {
   const percentage =
     Math.round(
-      (score / maxScore) *
-        10000
+      (score / maxScore) * 10000
     ) / 100;
 
   if (score === maxScore) {
@@ -289,51 +228,6 @@ function calculateReward(
   };
 }
 
-async function saveAnswers(
-  attemptId,
-  questions,
-  answers,
-  results
-) {
-  const rows =
-    questions.map(
-      (question) => ({
-        attempt_id:
-          attemptId,
-
-        question_key:
-          question.id,
-
-        answer_data: {
-          value:
-            answers[
-              question.id
-            ],
-        },
-
-        is_correct:
-          results[
-            question.id
-          ],
-      })
-    );
-
-  await supabase(
-    "attempt_answers?on_conflict=attempt_id,question_key",
-    {
-      method: "POST",
-
-      headers: {
-        Prefer:
-          "resolution=merge-duplicates,return=minimal",
-      },
-
-      body:
-        JSON.stringify(rows),
-    }
-  );
-}
-
 async function completeAttempt(
   attemptId,
   result
@@ -356,15 +250,21 @@ async function completeAttempt(
 
       body:
         JSON.stringify({
-          status: "completed",
+          status:
+            "completed",
+
           score:
             result.score,
+
           percentage:
             result.percentage,
+
           trophy:
             result.trophy,
+
           points:
             result.points,
+
           completed_at:
             new Date().toISOString(),
         }),
@@ -397,6 +297,10 @@ export default async (req) => {
   }
 
   try {
+    /*
+      1. Session
+    */
+
     const token =
       getCookie(
         req,
@@ -433,6 +337,11 @@ export default async (req) => {
       );
     }
 
+    /*
+      2. Seulement quizId
+      est envoyé par le navigateur.
+    */
+
     const body =
       await req.json();
 
@@ -441,30 +350,29 @@ export default async (req) => {
         body.quizId ?? ""
       ).trim();
 
-    const answers =
-      body.answers;
-
-    if (
-      !quizId ||
-      !answers ||
-      typeof answers !==
-        "object"
-    ) {
+    if (!quizId) {
       return json(
         {
           error:
-            "Données du quiz incomplètes.",
+            "Quiz manquant.",
         },
         400
       );
     }
+
+    /*
+      3. Utilisateur + quiz
+    */
 
     const [user, quiz] =
       await Promise.all([
         getUser(
           session.user_id
         ),
-        getQuiz(quizId),
+
+        getQuiz(
+          quizId
+        ),
       ]);
 
     if (!user) {
@@ -501,9 +409,12 @@ export default async (req) => {
       );
     }
 
+    /*
+      4. Questions officielles
+    */
+
     const questions =
-      quiz.content
-        ?.questions;
+      quiz.content?.questions;
 
     if (
       !Array.isArray(
@@ -514,25 +425,32 @@ export default async (req) => {
       return json(
         {
           error:
-            "Le contenu de ce quiz est indisponible.",
+            "Contenu du quiz indisponible.",
         },
         500
       );
     }
 
+    const maxScore =
+      questions.length;
+
     if (
       Number(
         quiz.max_score
-      ) !== questions.length
+      ) !== maxScore
     ) {
       return json(
         {
           error:
-            "La configuration du score du quiz est incohérente.",
+            "Configuration du score incohérente.",
         },
         500
       );
     }
+
+    /*
+      5. Tentative
+    */
 
     const attempt =
       await getAttempt(
@@ -544,7 +462,7 @@ export default async (req) => {
       return json(
         {
           error:
-            "Commencez le quiz avant de le terminer.",
+            "Le quiz doit d'abord être commencé.",
         },
         400
       );
@@ -562,16 +480,17 @@ export default async (req) => {
           result: {
             score:
               attempt.score,
-            maxScore:
-              Number(
-                quiz.max_score
-              ),
+
+            maxScore,
+
             percentage:
               Number(
                 attempt.percentage
               ),
+
             trophy:
               attempt.trophy,
+
             points:
               attempt.points,
           },
@@ -580,14 +499,38 @@ export default async (req) => {
       );
     }
 
-    const missing =
+    /*
+      6. Lecture des réponses
+      verrouillées
+    */
+
+    const answerRows =
+      await getLockedAnswers(
+        attempt.id
+      );
+
+    const answerMap =
+      new Map(
+        answerRows.map(
+          (row) => [
+            row.question_key,
+            row,
+          ]
+        )
+      );
+
+    /*
+      Vérifie qu'il existe
+      une réponse pour chacune
+      des questions du quiz.
+    */
+
+    const missingQuestions =
       questions
         .filter(
           (question) =>
-            !hasAnswer(
-              answers[
-                question.id
-              ]
+            !answerMap.has(
+              question.id
             )
         )
         .map(
@@ -595,44 +538,58 @@ export default async (req) => {
             question.id
         );
 
-    if (missing.length) {
+    if (
+      missingQuestions.length > 0
+    ) {
       return json(
         {
+          ok: false,
+
+          incomplete: true,
+
           error:
-            "Toutes les questions doivent recevoir une réponse.",
-          missingQuestions:
-            missing,
+            "Toutes les questions doivent être validées avant de terminer le quiz.",
+
+          answered:
+            maxScore -
+            missingQuestions.length,
+
+          total:
+            maxScore,
+
+          missingQuestions,
         },
         400
       );
     }
 
-    const results = {};
+    /*
+      7. Calcul du score
+      uniquement depuis Supabase
+    */
+
     let score = 0;
 
     for (
       const question
       of questions
     ) {
-      const correct =
-        evaluateQuestion(
-          question,
-          answers[
-            question.id
-          ]
+      const saved =
+        answerMap.get(
+          question.id
         );
 
-      results[
-        question.id
-      ] = correct;
-
-      if (correct) {
+      if (
+        saved?.is_correct ===
+        true
+      ) {
         score += 1;
       }
     }
 
-    const maxScore =
-      questions.length;
+    /*
+      8. Trophée + points
+    */
 
     const reward =
       calculateReward(
@@ -651,12 +608,10 @@ export default async (req) => {
         reward.points,
     };
 
-    await saveAnswers(
-      attempt.id,
-      questions,
-      answers,
-      results
-    );
+    /*
+      9. Fermeture définitive
+      de la tentative
+    */
 
     const updated =
       await completeAttempt(
@@ -682,13 +637,17 @@ export default async (req) => {
           result: {
             score:
               existing?.score,
+
             maxScore,
+
             percentage:
               Number(
                 existing?.percentage
               ),
+
             trophy:
               existing?.trophy,
+
             points:
               existing?.points,
           },
@@ -697,10 +656,19 @@ export default async (req) => {
       );
     }
 
+    /*
+      10. Écran de fin :
+      uniquement résultat.
+
+      Aucune correction détaillée
+      n'est renvoyée ici.
+    */
+
     return json({
       ok: true,
       result,
     });
+
   } catch (error) {
     console.error(
       "Attempt complete error:",
