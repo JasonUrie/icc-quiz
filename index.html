@@ -383,7 +383,8 @@ const state = {
   currentAnswer:null,
   correction:null,
   result:null,
-  selectedAvatar:"bible"
+  selectedAvatar:"bible",
+  syncPromise:null
 };
 
 const root = document.getElementById("root");
@@ -445,6 +446,272 @@ function toast(message){
   toastRoot.innerHTML = `<div class="toast">${esc(message)}</div>`;
   window.setTimeout(()=>{toastRoot.innerHTML=""},2600);
 }
+
+
+/*
+  QUIZ FLUIDE
+  ------------
+  La correction est calculée immédiatement dans le navigateur.
+  La réponse officielle est ensuite envoyée au serveur en arrière-plan.
+  Le score final reste calculé côté serveur.
+*/
+
+function normalizeQuizText(value){
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g,"")
+    .trim()
+    .toUpperCase();
+}
+
+function normalizeSet(value){
+  const values = Array.isArray(value) ? value : [value];
+  return [...new Set(
+    values
+      .map(v=>String(v ?? "").trim().toUpperCase())
+      .filter(Boolean)
+  )].sort();
+}
+
+function arraysEqual(a,b){
+  return a.length===b.length && a.every((value,index)=>value===b[index]);
+}
+
+function buildLocalCorrection(question,answer){
+  const evaluation = question?.evaluation;
+  const mode = evaluation?.mode;
+
+  if(mode==="exact_set"){
+    const submitted = normalizeSet(answer);
+    const correct = normalizeSet(evaluation.correct || []);
+    return {
+      questionId:question.id,
+      submittedAnswer:answer,
+      isCorrect:arraysEqual(submitted,correct),
+      reflective:false,
+      correctAnswer:evaluation.correct || [],
+      explanation:question.explanation ?? null,
+      reviewVideos:Array.isArray(question.reviewVideos) ? question.reviewVideos : []
+    };
+  }
+
+  if(mode==="normalized_text"){
+    const submitted = normalizeQuizText(answer);
+    const accepted = Array.isArray(evaluation.accepted) ? evaluation.accepted : [];
+    const normalizedAccepted = accepted.map(normalizeQuizText);
+    return {
+      questionId:question.id,
+      submittedAnswer:answer,
+      isCorrect:normalizedAccepted.includes(submitted),
+      reflective:false,
+      correctAnswer:accepted,
+      explanation:question.explanation ?? null,
+      reviewVideos:Array.isArray(question.reviewVideos) ? question.reviewVideos : []
+    };
+  }
+
+  if(mode==="any_nonempty"){
+    const isNonEmpty = Array.isArray(answer)
+      ? answer.length>0
+      : String(answer ?? "").trim().length>0;
+
+    return {
+      questionId:question.id,
+      submittedAnswer:answer,
+      isCorrect:isNonEmpty,
+      reflective:true,
+      correctAnswer:null,
+      explanation:question.explanation ?? null,
+      reviewVideos:Array.isArray(question.reviewVideos) ? question.reviewVideos : []
+    };
+  }
+
+  return null;
+}
+
+function syncStorageKey(){
+  return state.attempt?.id
+    ? `icc_quiz_pending_${state.attempt.id}`
+    : null;
+}
+
+function readPendingSync(){
+  const key = syncStorageKey();
+  if(!key) return [];
+
+  try{
+    const parsed = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  }catch{
+    return [];
+  }
+}
+
+function writePendingSync(items){
+  const key = syncStorageKey();
+  if(!key) return;
+
+  if(!items.length){
+    localStorage.removeItem(key);
+    return;
+  }
+
+  localStorage.setItem(key,JSON.stringify(items));
+}
+
+function enqueueAnswerForSync(questionId,answer){
+  const items = readPendingSync();
+  const next = items.filter(item=>item.questionId!==questionId);
+
+  next.push({
+    quizId:state.quiz.id,
+    questionId,
+    answer
+  });
+
+  /*
+    localStorage est écrit AVANT l'affichage de la correction.
+    Même si l'utilisateur ferme la page juste après, la réponse
+    reste donc récupérable lors de sa prochaine visite.
+  */
+  writePendingSync(next);
+}
+
+function removePendingAnswer(questionId){
+  writePendingSync(
+    readPendingSync().filter(item=>item.questionId!==questionId)
+  );
+}
+
+async function flushSyncQueue(){
+  if(state.syncPromise) return state.syncPromise;
+
+  const attemptId = state.attempt?.id;
+  if(!attemptId) return;
+
+  state.syncPromise = (async()=>{
+    while(true){
+      /*
+        Si l'utilisateur a quitté ce quiz entre-temps,
+        on ne mélange pas deux tentatives.
+      */
+      if(state.attempt?.id!==attemptId) return;
+
+      const items = readPendingSync();
+      if(!items.length) return;
+
+      const item = items[0];
+
+      try{
+        const {response} = await api("/api/attempts/answer",{
+          method:"POST",
+          headers:{"content-type":"application/json"},
+          body:JSON.stringify({
+            quizId:item.quizId,
+            questionId:item.questionId,
+            answer:item.answer
+          })
+        });
+
+        if(!response.ok){
+          /*
+            On garde la réponse dans localStorage.
+            Une nouvelle tentative aura lieu plus tard ou à la fin.
+          */
+          return;
+        }
+
+        removePendingAnswer(item.questionId);
+      }catch{
+        return;
+      }
+    }
+  })().finally(()=>{
+    state.syncPromise = null;
+  });
+
+  return state.syncPromise;
+}
+
+function kickPendingSyncOnExit(){
+  const items = readPendingSync();
+  for(const item of items){
+    try{
+      fetch("/api/attempts/answer",{
+        method:"POST",
+        headers:{"content-type":"application/json"},
+        body:JSON.stringify({
+          quizId:item.quizId,
+          questionId:item.questionId,
+          answer:item.answer
+        }),
+        keepalive:true
+      });
+    }catch{}
+  }
+}
+
+function wait(ms){
+  return new Promise(resolve=>setTimeout(resolve,ms));
+}
+
+async function ensureAllAnswersSynced(){
+  /*
+    Dans la grande majorité des cas la file sera déjà vide,
+    puisque les sauvegardes ont tourné pendant que l'utilisateur
+    lisait les corrections et répondait aux questions suivantes.
+  */
+  for(let attempt=0;attempt<4;attempt++){
+    await flushSyncQueue();
+
+    if(readPendingSync().length===0){
+      return true;
+    }
+
+    await wait(450 + attempt*300);
+  }
+
+  return readPendingSync().length===0;
+}
+
+function showCalculatingResult(){
+  root.innerHTML = `
+    <div class="loader" style="min-height:100dvh;text-align:center;padding:24px">
+      <div>
+        <div class="spinner" style="margin:0 auto 18px"></div>
+        <div style="font-family:var(--display);font-size:1.6rem;font-weight:700;margin-bottom:7px">
+          Calcul de ton résultat…
+        </div>
+        <div style="color:var(--muted);font-size:.88rem;line-height:1.5">
+          On termine la synchronisation de tes réponses.
+        </div>
+      </div>
+    </div>`;
+}
+
+function showSyncRetry(){
+  root.innerHTML = `
+    <div class="login-page">
+      <div class="login-box">
+        <div class="card" style="text-align:center">
+          <div style="font-size:2.4rem;margin-bottom:10px">📡</div>
+          <h2 style="font-family:var(--display);margin:0 0 8px">Connexion instable</h2>
+          <p style="color:var(--muted);line-height:1.55;margin:0 0 18px">
+            Tes réponses sont conservées sur cet appareil. Reconnecte-toi puis réessaie pour calculer ton résultat.
+          </p>
+          <button class="btn btn-primary btn-block" onclick="finishQuiz()">Réessayer</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+window.addEventListener("online",()=>{
+  void flushSyncQueue();
+});
+
+window.addEventListener("pagehide",()=>{
+  kickPendingSyncOnExit();
+});
 
 function setLoading(){
   root.innerHTML = `<div class="loader"><div class="spinner"></div></div>`;
@@ -747,7 +1014,16 @@ async function beginQuiz(quizId){
     state.currentAnswer = null;
     state.correction = null;
 
-    const answered = new Set(play.body.attempt?.answeredQuestionIds || []);
+    const serverAnswered = play.body.attempt?.answeredQuestionIds || [];
+    const pendingAnswered = readPendingSync().map(item=>item.questionId);
+    const answered = new Set([...serverAnswered,...pendingAnswered]);
+
+    /*
+      Si une précédente sauvegarde n'avait pas fini (fermeture,
+      réseau lent, etc.), on la relance sans bloquer le quiz.
+    */
+    void flushSyncQueue();
+
     const questions = state.quiz?.questions || [];
     const firstUnanswered = questions.findIndex(q=>!answered.has(q.id));
 
@@ -936,6 +1212,35 @@ async function submitAnswer(){
     return;
   }
 
+  /*
+    Cas normal : la correction est déjà disponible localement.
+    Aucun appel réseau n'est attendu avant de l'afficher.
+  */
+  const localCorrection = buildLocalCorrection(q,state.currentAnswer);
+
+  if(localCorrection){
+    /*
+      On mémorise d'abord la réponse localement, puis on affiche.
+      Cette opération est synchrone et quasi instantanée.
+    */
+    enqueueAnswerForSync(q.id,state.currentAnswer);
+
+    state.correction = localCorrection;
+    renderQuestion();
+
+    /*
+      La sauvegarde officielle continue EN ARRIÈRE-PLAN.
+      On ne met volontairement PAS "await" ici.
+    */
+    void flushSyncQueue();
+    return;
+  }
+
+  /*
+    Garde-fou pour un futur type de question que cette version
+    du navigateur ne connaîtrait pas encore : on repasse alors
+    sur l'ancienne validation serveur.
+  */
   const button = document.getElementById("validateButton");
   if(button){
     button.disabled = true;
@@ -968,7 +1273,6 @@ async function submitAnswer(){
     toast(e.message);
   }
 }
-
 async function nextQuestion(){
   if(state.currentQuestionIndex >= state.quiz.questions.length - 1){
     await finishQuiz();
@@ -982,9 +1286,16 @@ async function nextQuestion(){
 }
 
 async function finishQuiz(){
-  setLoading();
+  showCalculatingResult();
 
   try{
+    const synced = await ensureAllAnswersSynced();
+
+    if(!synced){
+      showSyncRetry();
+      return;
+    }
+
     const {response,body} = await api("/api/attempts/complete",{
       method:"POST",
       headers:{"content-type":"application/json"},
@@ -997,6 +1308,38 @@ async function finishQuiz(){
       return;
     }
 
+    /*
+      Si une réponse n'est exceptionnellement pas encore visible
+      côté serveur, on retente une dernière synchronisation au lieu
+      d'abandonner le quiz.
+    */
+    if(response.status===400 && body?.incomplete){
+      const syncedAgain = await ensureAllAnswersSynced();
+
+      if(syncedAgain){
+        const retry = await api("/api/attempts/complete",{
+          method:"POST",
+          headers:{"content-type":"application/json"},
+          body:JSON.stringify({quizId:state.quiz.id})
+        });
+
+        if(retry.response.ok){
+          state.result = retry.body.result;
+          showResult(true);
+          return;
+        }
+
+        if(retry.response.status===409 && retry.body?.alreadyCompleted){
+          state.result = retry.body.result;
+          showResult(false);
+          return;
+        }
+      }
+
+      showSyncRetry();
+      return;
+    }
+
     if(!response.ok){
       throw new Error(body?.error || "Impossible de terminer le quiz.");
     }
@@ -1005,10 +1348,9 @@ async function finishQuiz(){
     showResult(true);
   }catch(e){
     toast(e.message);
-    await showHome();
+    showSyncRetry();
   }
 }
-
 function showResult(showPopup=true){
   const r = state.result;
   if(!r){
