@@ -383,8 +383,7 @@ const state = {
   currentAnswer:null,
   correction:null,
   result:null,
-  selectedAvatar:"bible",
-  syncPromise:null
+  selectedAvatar:"bible"
 };
 
 const root = document.getElementById("root");
@@ -449,11 +448,14 @@ function toast(message){
 
 
 /*
-  QUIZ FLUIDE
-  ------------
-  La correction est calculée immédiatement dans le navigateur.
-  La réponse officielle est ensuite envoyée au serveur en arrière-plan.
-  Le score final reste calculé côté serveur.
+  QUIZ 100 % LOCAL PENDANT LES QUESTIONS
+  ---------------------------------------
+  - Les corrections sont déjà chargées au démarrage.
+  - "Valider" ne fait AUCUN appel réseau.
+  - "Suivant" ne fait AUCUN appel réseau.
+  - Les réponses validées sont conservées dans localStorage.
+  - À la fin seulement, les réponses sont envoyées en une seule fois
+    au serveur, qui enregistre et calcule le score officiel.
 */
 
 function normalizeQuizText(value){
@@ -529,149 +531,53 @@ function buildLocalCorrection(question,answer){
   return null;
 }
 
-function syncStorageKey(){
+function localAttemptStorageKey(){
   return state.attempt?.id
-    ? `icc_quiz_pending_${state.attempt.id}`
+    ? `icc_quiz_local_${state.attempt.id}`
     : null;
 }
 
-function readPendingSync(){
-  const key = syncStorageKey();
-  if(!key) return [];
+function readLocalAttempt(){
+  const key = localAttemptStorageKey();
+  if(!key) return {answers:{}};
 
   try{
-    const parsed = JSON.parse(localStorage.getItem(key) || "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(localStorage.getItem(key) || "{}");
+    return {
+      answers:
+        parsed && typeof parsed.answers==="object" && parsed.answers
+          ? parsed.answers
+          : {}
+    };
   }catch{
-    return [];
+    return {answers:{}};
   }
 }
 
-function writePendingSync(items){
-  const key = syncStorageKey();
+function readLocalAnswers(){
+  return readLocalAttempt().answers;
+}
+
+function saveLocalAnswer(questionId,answer){
+  const key = localAttemptStorageKey();
   if(!key) return;
 
-  if(!items.length){
-    localStorage.removeItem(key);
-    return;
-  }
+  const data = readLocalAttempt();
+  data.answers[questionId] = answer;
 
-  localStorage.setItem(key,JSON.stringify(items));
-}
-
-function enqueueAnswerForSync(questionId,answer){
-  const items = readPendingSync();
-  const next = items.filter(item=>item.questionId!==questionId);
-
-  next.push({
-    quizId:state.quiz.id,
-    questionId,
-    answer
-  });
-
-  /*
-    localStorage est écrit AVANT l'affichage de la correction.
-    Même si l'utilisateur ferme la page juste après, la réponse
-    reste donc récupérable lors de sa prochaine visite.
-  */
-  writePendingSync(next);
-}
-
-function removePendingAnswer(questionId){
-  writePendingSync(
-    readPendingSync().filter(item=>item.questionId!==questionId)
+  localStorage.setItem(
+    key,
+    JSON.stringify({
+      quizId:state.quiz?.id ?? null,
+      answers:data.answers,
+      updatedAt:new Date().toISOString()
+    })
   );
 }
 
-async function flushSyncQueue(){
-  if(state.syncPromise) return state.syncPromise;
-
-  const attemptId = state.attempt?.id;
-  if(!attemptId) return;
-
-  state.syncPromise = (async()=>{
-    while(true){
-      /*
-        Si l'utilisateur a quitté ce quiz entre-temps,
-        on ne mélange pas deux tentatives.
-      */
-      if(state.attempt?.id!==attemptId) return;
-
-      const items = readPendingSync();
-      if(!items.length) return;
-
-      const item = items[0];
-
-      try{
-        const {response} = await api("/api/attempts/answer",{
-          method:"POST",
-          headers:{"content-type":"application/json"},
-          body:JSON.stringify({
-            quizId:item.quizId,
-            questionId:item.questionId,
-            answer:item.answer
-          })
-        });
-
-        if(!response.ok){
-          /*
-            On garde la réponse dans localStorage.
-            Une nouvelle tentative aura lieu plus tard ou à la fin.
-          */
-          return;
-        }
-
-        removePendingAnswer(item.questionId);
-      }catch{
-        return;
-      }
-    }
-  })().finally(()=>{
-    state.syncPromise = null;
-  });
-
-  return state.syncPromise;
-}
-
-function kickPendingSyncOnExit(){
-  const items = readPendingSync();
-  for(const item of items){
-    try{
-      fetch("/api/attempts/answer",{
-        method:"POST",
-        headers:{"content-type":"application/json"},
-        body:JSON.stringify({
-          quizId:item.quizId,
-          questionId:item.questionId,
-          answer:item.answer
-        }),
-        keepalive:true
-      });
-    }catch{}
-  }
-}
-
-function wait(ms){
-  return new Promise(resolve=>setTimeout(resolve,ms));
-}
-
-async function ensureAllAnswersSynced(){
-  /*
-    Dans la grande majorité des cas la file sera déjà vide,
-    puisque les sauvegardes ont tourné pendant que l'utilisateur
-    lisait les corrections et répondait aux questions suivantes.
-  */
-  for(let attempt=0;attempt<4;attempt++){
-    await flushSyncQueue();
-
-    if(readPendingSync().length===0){
-      return true;
-    }
-
-    await wait(450 + attempt*300);
-  }
-
-  return readPendingSync().length===0;
+function clearLocalAttempt(){
+  const key = localAttemptStorageKey();
+  if(key) localStorage.removeItem(key);
 }
 
 function showCalculatingResult(){
@@ -683,7 +589,7 @@ function showCalculatingResult(){
           Calcul de ton résultat…
         </div>
         <div style="color:var(--muted);font-size:.88rem;line-height:1.5">
-          On termine la synchronisation de tes réponses.
+          On enregistre tes réponses et on calcule ton score.
         </div>
       </div>
     </div>`;
@@ -704,14 +610,6 @@ function showSyncRetry(){
       </div>
     </div>`;
 }
-
-window.addEventListener("online",()=>{
-  void flushSyncQueue();
-});
-
-window.addEventListener("pagehide",()=>{
-  kickPendingSyncOnExit();
-});
 
 function setLoading(){
   root.innerHTML = `<div class="loader"><div class="spinner"></div></div>`;
@@ -1015,14 +913,8 @@ async function beginQuiz(quizId){
     state.correction = null;
 
     const serverAnswered = play.body.attempt?.answeredQuestionIds || [];
-    const pendingAnswered = readPendingSync().map(item=>item.questionId);
-    const answered = new Set([...serverAnswered,...pendingAnswered]);
-
-    /*
-      Si une précédente sauvegarde n'avait pas fini (fermeture,
-      réseau lent, etc.), on la relance sans bloquer le quiz.
-    */
-    void flushSyncQueue();
+    const localAnswered = Object.keys(readLocalAnswers());
+    const answered = new Set([...serverAnswered,...localAnswered]);
 
     const questions = state.quiz?.questions || [];
     const firstUnanswered = questions.findIndex(q=>!answered.has(q.id));
@@ -1220,19 +1112,13 @@ async function submitAnswer(){
 
   if(localCorrection){
     /*
-      On mémorise d'abord la réponse localement, puis on affiche.
-      Cette opération est synchrone et quasi instantanée.
+      On conserve la réponse sur l'appareil AVANT d'afficher
+      la correction. Aucun appel serveur n'est lancé ici.
     */
-    enqueueAnswerForSync(q.id,state.currentAnswer);
+    saveLocalAnswer(q.id,state.currentAnswer);
 
     state.correction = localCorrection;
     renderQuestion();
-
-    /*
-      La sauvegarde officielle continue EN ARRIÈRE-PLAN.
-      On ne met volontairement PAS "await" ici.
-    */
-    void flushSyncQueue();
     return;
   }
 
@@ -1289,65 +1175,39 @@ async function finishQuiz(){
   showCalculatingResult();
 
   try{
-    const synced = await ensureAllAnswersSynced();
+    const answers = readLocalAnswers();
 
-    if(!synced){
-      showSyncRetry();
-      return;
-    }
-
-    const {response,body} = await api("/api/attempts/complete",{
+    const {response,body} = await api("/api/attempts/finish",{
       method:"POST",
       headers:{"content-type":"application/json"},
-      body:JSON.stringify({quizId:state.quiz.id})
+      body:JSON.stringify({
+        quizId:state.quiz.id,
+        answers
+      })
     });
 
     if(response.status===409 && body?.alreadyCompleted){
+      clearLocalAttempt();
       state.result = body.result;
       showResult(false);
       return;
     }
 
-    /*
-      Si une réponse n'est exceptionnellement pas encore visible
-      côté serveur, on retente une dernière synchronisation au lieu
-      d'abandonner le quiz.
-    */
     if(response.status===400 && body?.incomplete){
-      const syncedAgain = await ensureAllAnswersSynced();
-
-      if(syncedAgain){
-        const retry = await api("/api/attempts/complete",{
-          method:"POST",
-          headers:{"content-type":"application/json"},
-          body:JSON.stringify({quizId:state.quiz.id})
-        });
-
-        if(retry.response.ok){
-          state.result = retry.body.result;
-          showResult(true);
-          return;
-        }
-
-        if(retry.response.status===409 && retry.body?.alreadyCompleted){
-          state.result = retry.body.result;
-          showResult(false);
-          return;
-        }
-      }
-
-      showSyncRetry();
+      toast("Certaines réponses manquent encore.");
+      await beginQuiz(state.quiz.id);
       return;
     }
 
     if(!response.ok){
-      throw new Error(body?.error || "Impossible de terminer le quiz.");
+      throw new Error(body?.error || "Impossible de calculer ton résultat.");
     }
 
+    clearLocalAttempt();
     state.result = body.result;
     showResult(true);
   }catch(e){
-    toast(e.message);
+    console.error("Finish quiz error:",e);
     showSyncRetry();
   }
 }
