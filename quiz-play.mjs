@@ -242,21 +242,28 @@ async function getSavedAnswers(
 }
 
 /*
-  IMPORTANT :
-  On reconstruit volontairement
-  chaque question.
+  MODE QUIZ FLUIDE
 
-  On ne fait surtout pas :
+  Le navigateur reçoit maintenant, UNE SEULE FOIS
+  au démarrage du quiz :
+  - les questions
+  - les choix
+  - les règles de correction
+  - les explications
+  - les extraits vidéo
 
-  return {...question}
+  Cela permet d'afficher la correction immédiatement
+  lorsque l'utilisateur clique sur "Valider".
 
-  car cela enverrait aussi
-  evaluation.correct au navigateur.
+  L'enregistrement officiel des réponses continue
+  côté serveur via /api/attempts/answer.
+  Le score officiel continue d'être calculé côté
+  serveur via /api/attempts/complete.
 */
-function sanitizeQuestion(
+function buildClientQuestion(
   question
 ) {
-  const clean = {
+  const clientQuestion = {
     id:
       question.id,
 
@@ -271,10 +278,28 @@ function sanitizeQuestion(
 
     helper:
       question.helper ?? null,
+
+    /*
+      Oui, ces informations sont volontairement
+      envoyées au navigateur pour supprimer la
+      latence entre "Valider" et la correction.
+    */
+    evaluation:
+      question.evaluation ?? null,
+
+    explanation:
+      question.explanation ?? null,
+
+    reviewVideos:
+      Array.isArray(
+        question.reviewVideos
+      )
+        ? question.reviewVideos
+        : [],
   };
 
   if (question.preamble) {
-    clean.preamble = {
+    clientQuestion.preamble = {
       reference:
         question.preamble
           .reference ?? null,
@@ -290,7 +315,7 @@ function sanitizeQuestion(
       question.options
     )
   ) {
-    clean.options =
+    clientQuestion.options =
       question.options.map(
         (option) => ({
           id:
@@ -302,7 +327,7 @@ function sanitizeQuestion(
       );
   }
 
-  return clean;
+  return clientQuestion;
 }
 
 function buildSavedAnswers(
@@ -588,18 +613,16 @@ export default async (req) => {
       );
 
     /*
-      7. Nettoyage complet
-      des questions.
+      7. Préparation des questions
+      pour le mode fluide.
 
-      Aucune correction,
-      bonne réponse,
-      explication ou vidéo
-      n'est envoyée ici.
+      Les données de correction sont envoyées
+      une seule fois au démarrage du quiz.
     */
 
-    const safeQuestions =
+    const clientQuestions =
       questions.map(
-        sanitizeQuestion
+        buildClientQuestion
       );
 
     /*
@@ -638,10 +661,10 @@ export default async (req) => {
           ),
 
         questionCount:
-          safeQuestions.length,
+          clientQuestions.length,
 
         questions:
-          safeQuestions,
+          clientQuestions,
       },
 
       attempt: {
