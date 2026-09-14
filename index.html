@@ -815,8 +815,8 @@ async function showHome(){
         <div class="card current-quiz-card">
           ${quizStatusTag(current)}
           <div class="current-hero">
-            <img src="${esc(current.coverImage || DEFAULT_HERO)}" alt="Globe illuminé centré sur l’Afrique et l’Europe">
-          </div>
+  <span style="font-size:72px;line-height:1" role="img" aria-label="Force">💪</span>
+</div>
           <h1 class="current-title">${esc(current.title)}</h1>
           ${pastor?`<div class="current-pastor">${esc(pastor)}</div>`:""}
           <p class="current-desc">${esc(currentDescription(current))}</p>
